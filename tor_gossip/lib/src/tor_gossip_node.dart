@@ -17,7 +17,6 @@ class TorGossipNode {
   final TorServer _server = TorServer();
   final Uuid _uuid = const Uuid();
 
-  // 🌟 NEW: The custom client that handles the CONNECT tunnel
   late TorOnionClient _onionClient;
 
   String? _myOnionAddress;
@@ -32,14 +31,15 @@ class TorGossipNode {
   Stream<String> get onLog => _logController.stream;
   String? get onionAddress => _myOnionAddress;
 
+  // 🌟 NEW: Expose the list of known peers to the UI
+  List<String> get knownPeers => _peerManager.getAllPeers();
+
   TorGossipNode({
     int port = 8080,
     List<String> bootstrapPeers = const [],
   })  : _port = port,
         _peerManager = PeerManager(bootstrapPeers: bootstrapPeers) {
     _server.onMessageReceived = _handleIncomingMessage;
-
-    // Initialize the client (it doesn't open connections until used)
     _onionClient = _tor.getUnsecureTorClient();
   }
 
@@ -100,14 +100,12 @@ class TorGossipNode {
       timestamp: DateTime.now().millisecondsSinceEpoch,
     );
 
-    _log("👋 Pinging peer $peerOnion to initiate handshake...");
+    _log("👋 Pinging peer $peerOnion...");
     await _sendToPeer(peerOnion, envelope);
   }
 
   void _handleIncomingMessage(GossipEnvelope envelope) {
-    if (_dedupManager.isDuplicate(envelope.id)) {
-      return;
-    }
+    if (_dedupManager.isDuplicate(envelope.id)) return;
     _dedupManager.markSeen(envelope.id);
 
     if (envelope.origin != _myOnionAddress) {
@@ -126,13 +124,8 @@ class TorGossipNode {
 
   Future<void> _gossipToPeers(GossipEnvelope envelope) async {
     if (!_isStarted) return;
-
     final targets = _peerManager.getRandomPeers(3, exclude: {envelope.origin, _myOnionAddress ?? ''});
-
-    if (targets.isEmpty) {
-      _log("⚠️ No peers to gossip to.");
-      return;
-    }
+    if (targets.isEmpty) return; // Silent return to reduce log spam
 
     _log("✨ Gossiping msg ${envelope.id.substring(0, 4)} to ${targets.length} peers...");
     for (var peer in targets) {
@@ -140,36 +133,28 @@ class TorGossipNode {
     }
   }
 
-  /// 🌟 UPDATED: Uses TorOnionClient to send plain HTTP requests through the tunnel.
   Future<void> _sendToPeer(String peerOnion, GossipEnvelope envelope,
       {int retryCount = 0}) async {
-    if (!_isStarted) {
-      _log("⚠️ Attempt to send while node not started.");
-      return;
-    }
+    if (!_isStarted) return;
     if (retryCount >= 3) {
       _peerManager.reportFailure(peerOnion);
-      _log("❌ Failed to reach $peerOnion after 3 retries. Dropping message.");
+      _log("❌ Failed to reach $peerOnion after 3 retries.");
       return;
     }
 
     final cleanHost = _peerManager.sanitizeOnion(peerOnion);
-    if (cleanHost == null) {
-      _log("⚠️ Invalid peer address: $peerOnion. Skipping send.");
-      return;
-    }
+    if (cleanHost == null) return;
 
-    // Construct standard HTTP URL. The Plugin handles the CONNECT tunnel logic.
+    // Use http:// scheme for the new Client
     final url = 'http://$cleanHost/gossip';
 
     try {
-      // 🚀 Use the new Client to POST
       final response = await _onionClient.post(
         url,
         body: envelope.toRawJson(),
         headers: {
           'Content-Type': 'application/json',
-          'Host': cleanHost, // Explicitly set Host header for Tor routing
+          'Host': cleanHost,
         },
       );
 
@@ -177,14 +162,12 @@ class TorGossipNode {
         _peerManager.reportSuccess(cleanHost);
         _log("✅ Sent to $cleanHost (200).");
       } else {
-        _log("⚠️ Peer $cleanHost returned ${response.statusCode}. Body: ${response.body}");
+        _log("⚠️ Peer $cleanHost returned ${response.statusCode}.");
         await Future.delayed(const Duration(seconds: 5));
         await _sendToPeer(cleanHost, envelope, retryCount: retryCount + 1);
       }
-
     } catch (e) {
       _log("❌ Error sending to $cleanHost: $e");
-      // Retry on network errors
       await Future.delayed(const Duration(seconds: 5));
       await _sendToPeer(cleanHost, envelope, retryCount: retryCount + 1);
     }
