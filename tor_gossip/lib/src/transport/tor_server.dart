@@ -11,7 +11,6 @@ class TorServer {
   HttpServer? _server;
 
   /// The callback function to run when a valid message arrives.
-  /// This is public and nullable so the main Node can assign it after initialization.
   Function(GossipEnvelope envelope)? onMessageReceived;
 
   TorServer();
@@ -24,55 +23,52 @@ class TorServer {
     // The main endpoint peers will hit: POST http://[your_onion]/gossip
     router.post('/gossip', _handleGossip);
 
-    // A health check endpoint (optional, good for debugging)
+    // A health check endpoint
     router.get('/health', (Request req) => Response.ok('Onion Alive'));
 
-    // Create the pipeline with logging
     final handler = Pipeline()
         .addMiddleware(logRequests())
         .addHandler(router);
 
-    // Bind to localhost.
-    // SECURITY NOTE: We bind to '127.0.0.1' so only the Tor process
-    // (running on the same device) can talk to us.
-    // FIX: 'shared: true' prevents "Address already in use" errors during Hot Restart.
+    // ⚠️ CRITICAL UPDATE: Bind to InternetAddress.anyIPv4 (0.0.0.0).
+    // The native Tor process (running in a separate thread/namespace) needs
+    // to reach this server. Binding to 'localhost' often fails on Android.
     _server = await shelf_io.serve(
       handler,
-      '127.0.0.1',
+      InternetAddress.anyIPv4,
       port,
       shared: true,
     );
 
-    print('🧅 TorServer listening on localhost:$port');
+    print('🧅 TorServer listening on 0.0.0.0:$port');
   }
 
   /// Stops the server
   Future<void> stop() async {
-    await _server?.close();
+    await _server?.close(force: true);
     _server = null;
   }
 
   /// Handles incoming gossip packets
   Future<Response> _handleGossip(Request request) async {
     try {
-      // 1. Read the body
       final content = await request.readAsString();
 
       if (content.isEmpty) {
         return Response.badRequest(body: 'Empty payload');
       }
 
-      // 2. Parse into Envelope
       final envelope = GossipEnvelope.fromRawJson(content);
 
-      // 3. Pass up to the Logic Layer (GossipEngine)
       if (onMessageReceived != null) {
         onMessageReceived!(envelope);
       } else {
         print("⚠️ Message received, but no listener attached!");
       }
 
-      return Response.ok('{"status":"received"}');
+      return Response.ok('{"status":"received"}', headers: {
+        HttpHeaders.contentTypeHeader: 'application/json; charset=utf-8'
+      });
     } catch (e) {
       print('❌ Malformed Gossip Packet: $e');
       return Response.badRequest(body: 'Invalid Envelope format');

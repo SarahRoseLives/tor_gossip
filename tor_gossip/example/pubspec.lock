@@ -344,10 +344,10 @@ packages:
     dependency: transitive
     description:
       name: tor_hidden_service
-      sha256: "3ddf613a282b6339da19cd6cd0ba3545a0971d469fbbf37ef84bf600f053a901"
+      sha256: c3db2469d34575196d5c963641c59cc2a8e49a7ade83853c98bca21687c93249
       url: "https://pub.dev"
     source: hosted
-    version: "0.0.3"
+    version: "0.0.4"
   typed_data:
     dependency: transitive
     description:

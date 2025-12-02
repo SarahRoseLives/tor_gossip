@@ -19,14 +19,55 @@ class PeerManager {
     }
   }
 
-  /// Adds a new peer if it is valid and unknown.
-  bool addPeer(String onionAddress) {
-    // 1. Clean the string
-    final cleanAddress = onionAddress.trim().toLowerCase();
+  /// Public helper to sanitize input and return a bare onion host (or null).
+  /// Accepts:
+  ///  - "abc...onion"
+  ///  - "https://abc...onion/gossip"
+  ///  - "http://abc...onion:1234/path"
+  /// Returns: "abc...onion" or null if it cannot extract a valid host.
+  String? sanitizeOnion(String input) {
+    var s = input.trim().toLowerCase();
 
-    // 2. Validate format (Basic security check)
-    if (!_onionRegex.hasMatch(cleanAddress)) {
-      print('⚠️ Ignored invalid onion address: $cleanAddress');
+    // If it looks like a URL, try parsing it
+    try {
+      if (s.contains('://')) {
+        final uri = Uri.parse(s);
+        if (uri.host.isNotEmpty) {
+          s = uri.host;
+        } else {
+          // fallback: strip scheme manually then split by '/'
+          s = s.replaceFirst(RegExp(r'^.*://'), '');
+          s = s.split('/').first;
+        }
+      } else {
+        // may contain path or port; remove path portion
+        s = s.split('/').first;
+      }
+
+      // remove port if present
+      if (s.contains(':')) {
+        s = s.split(':').first;
+      }
+
+      // final cleanup
+      s = s.trim();
+
+      if (_onionRegex.hasMatch(s)) {
+        return s;
+      } else {
+        return null;
+      }
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// Adds a new peer if it is valid and unknown.
+  /// Accepts full URL or bare host.
+  bool addPeer(String onionAddress) {
+    final cleanAddress = sanitizeOnion(onionAddress);
+    if (cleanAddress == null) {
+      print('⚠️ Ignored invalid onion address: $onionAddress');
       return false;
     }
 
@@ -42,9 +83,10 @@ class PeerManager {
 
   /// Removes a peer (e.g., if they are dead or malicious).
   void removePeer(String onionAddress) {
-    _knownPeers.remove(onionAddress);
-    _failureCounts.remove(onionAddress);
-    print('🗑️ Removed peer: $onionAddress');
+    final clean = sanitizeOnion(onionAddress) ?? onionAddress;
+    _knownPeers.remove(clean);
+    _failureCounts.remove(clean);
+    print('🗑️ Removed peer: $clean');
   }
 
   /// Returns a random subset of peers to gossip with.
@@ -69,20 +111,22 @@ class PeerManager {
   /// Call this when a request to a peer fails.
   /// If they fail too many times, they are removed.
   void reportFailure(String onionAddress) {
-    int currentFailures = (_failureCounts[onionAddress] ?? 0) + 1;
+    final clean = sanitizeOnion(onionAddress) ?? onionAddress;
+    int currentFailures = (_failureCounts[clean] ?? 0) + 1;
 
     if (currentFailures >= _maxFailures) {
-      print('💀 Peer $onionAddress is dead. Removing.');
-      removePeer(onionAddress);
+      print('💀 Peer $clean is dead. Removing.');
+      removePeer(clean);
     } else {
-      _failureCounts[onionAddress] = currentFailures;
+      _failureCounts[clean] = currentFailures;
     }
   }
 
   /// Call this when a request succeeds to reset their failure count.
   void reportSuccess(String onionAddress) {
-    if (_failureCounts.containsKey(onionAddress)) {
-      _failureCounts.remove(onionAddress);
+    final clean = sanitizeOnion(onionAddress) ?? onionAddress;
+    if (_failureCounts.containsKey(clean)) {
+      _failureCounts.remove(clean);
     }
   }
 

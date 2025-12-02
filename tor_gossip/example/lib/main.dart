@@ -26,44 +26,99 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
   @override
   void initState() {
     super.initState();
-    _node.onLog.listen((log) => setState(() => _logs.add(log)));
+
+    // Subscribe to engine logs and display them in the UI
+    _node.onLog.listen((log) => setState(() => _logs.insert(0, log)));
+
+    // Listen to messages (only non-handshake messages hit this stream)
     _node.onMessage.listen((envelope) {
       setState(() {
-        _logs.add("📩 MSG from ${envelope.origin.substring(0, 6)}...");
-        _messages.add(envelope);
+        _logs.insert(0, "📩 MSG from ${envelope.origin.substring(0, 6)}...");
+        _messages.insert(0, envelope); // Insert at 0 to show newest first
       });
     });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      SystemChannels.lifecycle.setMessageHandler((msg) {
+        if (msg == AppLifecycleState.detached.toString() ||
+            msg == AppLifecycleState.inactive.toString()) {
+          _node.stop();
+        }
+        return Future.value(null);
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _node.stop();
+    _peerInputController.dispose();
+    _msgInputController.dispose();
+    super.dispose();
   }
 
   Future<void> _start() async {
     try {
       await _node.start();
       setState(() => _isReady = true);
+      _logs.insert(0, "✅ Node started. My onion: ${_node.onionAddress ?? 'unknown'}");
     } catch (e) {
-      setState(() => _logs.add("❌ Error: $e"));
+      setState(() => _logs.insert(0, "❌ Error starting node: $e"));
     }
   }
 
-  void _addPeer(String onion) {
-    if (onion.contains(".onion")) {
-      // Use the method we added to TorGossipNode
-      _node.addPeer(onion);
-      _peerInputController.text = onion;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Peer Added: ${onion.substring(0, 10)}...")),
-      );
+  // Normalize user input.
+  // 🌟 UPDATE: Defaults to http:// because the new client handles the tunnel automatically.
+  Future<void> _addAndPingPeer(String onionInput) async {
+    var input = onionInput.trim();
+    if (input.isEmpty) return;
+
+    if (!input.startsWith('http')) {
+      input = 'http://$input'; // Default to HTTP for standard onion services
     }
+
+    try {
+      await _node.pingPeer(input);
+      setState(() {
+        _peerInputController.text = input;
+        _logs.insert(0, "➕ Added & pinged peer: ${input.replaceAll('http://', '')}");
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Peer pinged: ${input.replaceFirst('http://', '').substring(0, 10)}...")),
+      );
+    } catch (e) {
+      setState(() => _logs.insert(0, "❌ Error pinging peer: $e"));
+    }
+  }
+
+  void _onSendPressed() {
+    final peerText = _peerInputController.text.trim();
+    final msg = _msgInputController.text;
+    if (peerText.isEmpty || msg.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Please set peer and message")));
+      return;
+    }
+
+    _addAndPingPeer(peerText).then((_) {
+      _node.addPeer(peerText);
+      _node.publish("chat", msg);
+      setState(() {
+        _logs.insert(0, "📤 Published: $msg");
+        _msgInputController.clear();
+      });
+    });
   }
 
   Future<void> _scanQr() async {
-    // Request permission first
     if (await Permission.camera.request().isGranted) {
       final result = await Navigator.of(context).push(
         MaterialPageRoute(builder: (context) => const QrScanScreen()),
       );
       if (result != null && result is String) {
-        _addPeer(result);
+        _addAndPingPeer(result);
       }
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Camera permission required")));
     }
   }
 
@@ -92,6 +147,25 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
     );
   }
 
+  Future<void> _diagnosePeer() async {
+    final raw = _peerInputController.text.trim();
+    if (!raw.contains('.onion')) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Enter a .onion address first")));
+      return;
+    }
+
+    setState(() => _logs.insert(0, "🔎 Diagnosing ${raw} ..."));
+
+    try {
+      // 🌟 UPDATE: Default to http://
+      final target = raw.startsWith('http') ? raw : 'http://$raw';
+      await _node.pingPeer(target);
+      setState(() => _logs.insert(0, "🔎 Ping sent to $target (via TorOnionClient)"));
+    } catch (e) {
+      setState(() => _logs.insert(0, "❌ Diagnose failed: $e"));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -102,9 +176,7 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
             Padding(
               padding: const EdgeInsets.all(20.0),
               child: ElevatedButton(
-                  onPressed: _start,
-                  child: const Text("BOOTSTRAP TOR NODE")
-              ),
+                  onPressed: _start, child: const Text("BOOTSTRAP TOR NODE")),
             )
           else
             Container(
@@ -118,8 +190,9 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text("My Status: ONLINE",
-                            style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
-                        Text(_node.onionAddress != null
+                            style:
+                                TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
+                        SelectableText(_node.onionAddress != null
                             ? "${_node.onionAddress!.substring(0, 15)}..."
                             : "Loading..."),
                       ],
@@ -136,7 +209,6 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
 
           const Divider(),
 
-          // --- Input / Scan Area ---
           if (_isReady)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -152,25 +224,20 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
                       controller: _peerInputController,
                       style: const TextStyle(fontSize: 12),
                       decoration: const InputDecoration(
-                        labelText: "Target Peer Onion",
-                        hintText: "Scan or Paste .onion",
-                        border: OutlineInputBorder(),
-                        contentPadding: EdgeInsets.symmetric(horizontal: 8)
-                      ),
+                          labelText: "Target Peer Onion",
+                          hintText: "Scan or Paste .onion",
+                          border: OutlineInputBorder(),
+                          contentPadding: EdgeInsets.symmetric(horizontal: 8)),
                     ),
                   ),
                   IconButton(
+                    icon: const Icon(Icons.bug_report, color: Colors.orange),
+                    onPressed: _diagnosePeer,
+                    tooltip: "Diagnose Peer",
+                  ),
+                  IconButton(
                     icon: const Icon(Icons.send, color: Colors.green),
-                    onPressed: () {
-                      final msg = _msgInputController.text;
-                      if (msg.isNotEmpty) {
-                         // Manually add peer from box before sending to ensure they are in the list
-                         _node.addPeer(_peerInputController.text);
-                         _node.publish("chat", msg);
-                         _logs.add("📤 Sent: $msg");
-                         _msgInputController.clear();
-                      }
-                    },
+                    onPressed: _onSendPressed,
                   )
                 ],
               ),
@@ -187,13 +254,10 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
 
           const Divider(),
 
-          // --- Logs ---
           Expanded(
             child: ListView.builder(
-              reverse: true, // Show newest at bottom (if we inverted list logic) or top
               itemCount: _messages.length + _logs.length,
               itemBuilder: (context, index) {
-                // Quick hack to merge lists for display
                 if (index < _messages.length) {
                   final m = _messages[index];
                   return ListTile(
@@ -204,11 +268,10 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
                   );
                 }
                 final logIndex = index - _messages.length;
-                // Show logs in reverse order (newest first)
-                final log = _logs[(_logs.length - 1) - logIndex];
                 return Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  child: Text(log, style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                  child: Text(_logs[logIndex],
+                      style: const TextStyle(fontSize: 10, color: Colors.grey)),
                 );
               },
             ),
@@ -219,7 +282,6 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
   }
 }
 
-// --- Simple Scanner Screen ---
 class QrScanScreen extends StatelessWidget {
   const QrScanScreen({super.key});
 
@@ -233,7 +295,7 @@ class QrScanScreen extends StatelessWidget {
           for (final barcode in barcodes) {
             if (barcode.rawValue != null) {
               Navigator.pop(context, barcode.rawValue);
-              break; // Only scan one
+              break;
             }
           }
         },
