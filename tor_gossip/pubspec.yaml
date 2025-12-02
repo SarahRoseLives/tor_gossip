@@ -1,0 +1,30 @@
+name: tor_gossip
+description: A P2P gossip protocol implementation over Tor Hidden Services.
+version: 0.0.1
+homepage: https://github.com/your_username/tor_gossip
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: ">=3.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # The Transport Layer
+  tor_hidden_service: ^0.0.3
+
+  # The Server Layer (To receive gossip)
+  shelf: ^1.4.0
+  shelf_router: ^1.1.0
+
+  # Utilities
+  uuid: ^4.0.0      # For unique message IDs
+  json_annotation: ^4.8.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
+  build_runner: ^2.4.0
+  json_serializable: ^6.7.0
