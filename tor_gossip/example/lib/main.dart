@@ -18,7 +18,8 @@ class GossipTestScreen extends StatefulWidget {
   State<GossipTestScreen> createState() => _GossipTestScreenState();
 }
 
-class _GossipTestScreenState extends State<GossipTestScreen> {
+// 1. Add WidgetsBindingObserver to properly handle lifecycle changes
+class _GossipTestScreenState extends State<GossipTestScreen> with WidgetsBindingObserver {
   final _node = TorGossipNode();
 
   // Controllers
@@ -32,61 +33,77 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
   bool _isReady = false;
   Timer? _peerRefreshTimer;
 
+  // 2. Track subscriptions so we can cancel them to prevent memory leaks
+  StreamSubscription? _logSub;
+  StreamSubscription? _msgSub;
+
   @override
   void initState() {
     super.initState();
+    // Register lifecycle observer
+    WidgetsBinding.instance.addObserver(this);
 
-    // 1. Logs
-    _node.onLog.listen((log) => setState(() => _logs.insert(0, log)));
-
-    // 2. Messages
-    _node.onMessage.listen((envelope) {
-      setState(() {
-        _logs.insert(0, "📩 MSG from ${envelope.origin.substring(0, 6)}...");
-        _messages.insert(0, envelope);
-        // Refresh peers when we get a message (discovery)
-        _peers = _node.knownPeers;
-      });
-    });
-
-    // 3. Periodic Peer Refresh (In case they are added via gossip)
-    _peerRefreshTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
-      if (_isReady) {
-        setState(() => _peers = _node.knownPeers);
+    // 3. Store subscriptions
+    _logSub = _node.onLog.listen((log) {
+      // 4. Check 'mounted' before calling setState
+      if (mounted) {
+        setState(() => _logs.insert(0, log));
       }
     });
 
-    // 4. Lifecycle cleanup
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      SystemChannels.lifecycle.setMessageHandler((msg) {
-        if (msg == AppLifecycleState.detached.toString() ||
-            msg == AppLifecycleState.inactive.toString()) {
-          _node.stop();
-        }
-        return Future.value(null);
-      });
+    _msgSub = _node.onMessage.listen((envelope) {
+      if (mounted) {
+        setState(() {
+          _logs.insert(0, "📩 MSG from ${envelope.origin.substring(0, 6)}...");
+          _messages.insert(0, envelope);
+          _peers = _node.knownPeers;
+        });
+      }
     });
+
+    _peerRefreshTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+      if (_isReady && mounted) {
+        setState(() => _peers = _node.knownPeers);
+      }
+    });
+  }
+
+  // 5. Proper Lifecycle Management
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // ⚠️ CRITICAL FIX: Only stop Tor if the app is PAUSED (backgrounded) or DETACHED.
+    // 'inactive' happens when you switch to the Camera/QR Scanner or ask for permissions.
+    // If we stop on 'inactive', the node dies while you are scanning.
+    if (state == AppLifecycleState.detached) {
+      _node.stop();
+    }
   }
 
   @override
   void dispose() {
-    _node.stop();
+    // 6. Clean up everything
+    WidgetsBinding.instance.removeObserver(this);
+    _logSub?.cancel();
+    _msgSub?.cancel();
+    _peerRefreshTimer?.cancel();
     _peerInputController.dispose();
     _msgInputController.dispose();
-    _peerRefreshTimer?.cancel();
+    _node.stop();
     super.dispose();
   }
 
   Future<void> _start() async {
     try {
       await _node.start();
-      setState(() {
-        _isReady = true;
-        _peers = _node.knownPeers;
-      });
-      _logs.insert(0, "✅ Node started. My onion: ${_node.onionAddress ?? 'unknown'}");
+      if (mounted) {
+        setState(() {
+          _isReady = true;
+          _peers = _node.knownPeers;
+        });
+        _logs.insert(0, "✅ Node started. My onion: ${_node.onionAddress ?? 'unknown'}");
+      }
     } catch (e) {
-      setState(() => _logs.insert(0, "❌ Error starting node: $e"));
+      if (mounted) setState(() => _logs.insert(0, "❌ Error starting node: $e"));
     }
   }
 
@@ -96,23 +113,26 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
     var input = onionInput.trim();
     if (input.isEmpty) return;
 
-    // Use http:// for the new client
     if (!input.startsWith('http')) {
       input = 'http://$input';
     }
 
     try {
+      // Don't await the ping blocking the UI, let it happen
       await _node.pingPeer(input);
-      setState(() {
-        _peerInputController.text = input;
-        _peers = _node.knownPeers; // Update UI immediately
-        _logs.insert(0, "➕ Added & pinged peer: ${input.replaceAll('http://', '')}");
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Peer added & pinged: ${input.substring(0, 15)}...")),
-      );
+
+      if (mounted) {
+        setState(() {
+          _peerInputController.text = input;
+          _peers = _node.knownPeers;
+          _logs.insert(0, "➕ Added & pinged peer: ${input.replaceAll('http://', '')}");
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Peer added & pinged: ${input.substring(0, 15)}...")),
+        );
+      }
     } catch (e) {
-      setState(() => _logs.insert(0, "❌ Error pinging peer: $e"));
+      if (mounted) setState(() => _logs.insert(0, "❌ Error pinging peer: $e"));
     }
   }
 
@@ -126,22 +146,30 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
     }
 
     _node.publish("chat", msg);
-    setState(() {
-      _logs.insert(0, "📤 Published: $msg");
-      _msgInputController.clear();
-    });
+    if (mounted) {
+      setState(() {
+        _logs.insert(0, "📤 Published: $msg");
+        _msgInputController.clear();
+      });
+    }
   }
 
   Future<void> _scanQr() async {
+    // Permission request might trigger 'AppLifecycleState.inactive'
     if (await Permission.camera.request().isGranted) {
+      if (!mounted) return;
+
       final result = await Navigator.of(context).push(
         MaterialPageRoute(builder: (context) => const QrScanScreen()),
       );
+
       if (result != null && result is String) {
         _addAndPingPeer(result);
       }
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Camera permission required")));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Camera permission required")));
+      }
     }
   }
 
@@ -342,8 +370,8 @@ class _GossipTestScreenState extends State<GossipTestScreen> {
                         tooltip: "Ping this peer",
                       ),
                       onTap: () {
-                         Clipboard.setData(ClipboardData(text: peer));
-                         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Address Copied")));
+                          Clipboard.setData(ClipboardData(text: peer));
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Address Copied")));
                       },
                     );
                   },
