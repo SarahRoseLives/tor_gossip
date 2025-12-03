@@ -12,7 +12,7 @@ dependencies:
     sdk: flutter
 
   # The Transport Layer
-  tor_hidden_service: ^0.0.4
+  tor_hidden_service: ^0.0.5
 
   # The Server Layer (To receive gossip)
   shelf: ^1.4.0
