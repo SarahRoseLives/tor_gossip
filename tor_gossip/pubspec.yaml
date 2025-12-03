@@ -21,6 +21,8 @@ dependencies:
   # Utilities
   uuid: ^4.0.0      # For unique message IDs
   json_annotation: ^4.8.0
+  cryptography: ^2.9.0
+  hex: ^0.2.0
 
 dev_dependencies:
   flutter_test:

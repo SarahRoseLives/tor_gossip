@@ -1,22 +1,26 @@
 import 'dart:convert';
 
 class GossipEnvelope {
-  /// Unique ID (UUID v4) to prevent processing the same message twice.
+  /// Unique ID (UUID v4)
   final String id;
 
-  /// The .onion address of the sender (the "Return Address").
+  /// The .onion address of the sender (Return Address)
   final String origin;
 
-  /// The channel this message belongs to (e.g., 'chat', 'bitcoin_tx').
-  /// This allows you to run multiple apps on one gossip network.
+  /// The channel this message belongs to
   final String topic;
 
-  /// The actual data. We store it as a String.
-  /// Complex objects should be JSON-encoded before sending.
+  /// The actual data
   final String payload;
 
-  /// When this message was created (milliseconds since epoch).
+  /// Timestamp (ms epoch)
   final int timestamp;
+
+  /// NEW: The sender's Ed25519 Public Key (Hex)
+  final String senderPub;
+
+  /// NEW: The Ed25519 Signature of the message content (Hex)
+  final String signature;
 
   GossipEnvelope({
     required this.id,
@@ -24,9 +28,10 @@ class GossipEnvelope {
     required this.topic,
     required this.payload,
     required this.timestamp,
+    required this.senderPub,
+    required this.signature,
   });
 
-  /// Factory to create a clean envelope from a JSON map (Incoming data)
   factory GossipEnvelope.fromJson(Map<String, dynamic> json) {
     return GossipEnvelope(
       id: json['id'] as String,
@@ -34,10 +39,11 @@ class GossipEnvelope {
       topic: json['topic'] as String,
       payload: json['payload'] as String,
       timestamp: json['timestamp'] as int,
+      senderPub: json['senderPub'] as String? ?? '', // Fallback for old msgs
+      signature: json['signature'] as String? ?? '',
     );
   }
 
-  /// Convert to JSON map for sending over the network (Outgoing data)
   Map<String, dynamic> toJson() {
     return {
       'id': id,
@@ -45,13 +51,13 @@ class GossipEnvelope {
       'topic': topic,
       'payload': payload,
       'timestamp': timestamp,
+      'senderPub': senderPub,
+      'signature': signature,
     };
   }
 
-  /// Helper to convert the whole object to a string for HTTP bodies
   String toRawJson() => jsonEncode(toJson());
 
-  /// Helper to create from a raw string
   factory GossipEnvelope.fromRawJson(String str) =>
       GossipEnvelope.fromJson(jsonDecode(str));
 }

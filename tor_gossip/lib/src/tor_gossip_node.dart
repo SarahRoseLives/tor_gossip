@@ -1,19 +1,19 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:convert';
-
 import 'package:tor_hidden_service/tor_hidden_service.dart';
 import 'package:uuid/uuid.dart';
 
 import 'envelopes/gossip_envelope.dart';
 import 'managers/dedup_manager.dart';
 import 'managers/peer_manager.dart';
+import 'managers/crypto_manager.dart'; // Import the new manager
 import 'transport/tor_server.dart';
 
 class TorGossipNode {
   final TorHiddenService _tor = TorHiddenService();
   final PeerManager _peerManager;
   final DedupManager _dedupManager = DedupManager();
+  final CryptoManager _cryptoManager = CryptoManager(); // New
   final TorServer _server = TorServer();
   final Uuid _uuid = const Uuid();
 
@@ -30,8 +30,6 @@ class TorGossipNode {
   Stream<GossipEnvelope> get onMessage => _msgController.stream;
   Stream<String> get onLog => _logController.stream;
   String? get onionAddress => _myOnionAddress;
-
-  // 🌟 NEW: Expose the list of known peers to the UI
   List<String> get knownPeers => _peerManager.getAllPeers();
 
   TorGossipNode({
@@ -46,6 +44,12 @@ class TorGossipNode {
   Future<void> start() async {
     if (_isStarted) return;
     _log("🚀 Starting Tor Gossip Node...");
+
+    // 1. Init Crypto
+    await _cryptoManager.init();
+    _log("🔐 Crypto Initialized.");
+
+    // 2. Start Tor
     _tor.onLog.listen((log) => _log("TOR: $log"));
     await _tor.start();
     _log("✅ Tor Bootstrapped.");
@@ -54,6 +58,7 @@ class TorGossipNode {
     if (_myOnionAddress == null) throw Exception("Failed to get Onion Hostname");
     _log("🧅 My Address: $_myOnionAddress");
 
+    // 3. Start Server
     await _server.start(_port);
 
     _isStarted = true;
@@ -69,22 +74,25 @@ class TorGossipNode {
   Future<void> publish(String topic, String payload) async {
     if (!_isStarted) throw Exception("Node not started");
 
+    final id = _uuid.v4();
+    final ts = DateTime.now().millisecondsSinceEpoch;
+
+    // Sign the message
+    final sig = await _cryptoManager.sign(id, topic, payload, ts);
+    final myPub = await _cryptoManager.publicKeyHex;
+
     final envelope = GossipEnvelope(
-      id: _uuid.v4(),
+      id: id,
       origin: _myOnionAddress!,
       topic: topic,
       payload: payload,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
+      timestamp: ts,
+      senderPub: myPub,
+      signature: sig,
     );
 
     _dedupManager.markSeen(envelope.id);
     _gossipToPeers(envelope);
-  }
-
-  void addPeer(String onionAddress) {
-    if (_peerManager.addPeer(onionAddress)) {
-      _log("➕ Manually added peer: $onionAddress");
-    }
   }
 
   Future<void> pingPeer(String peerOnion) async {
@@ -92,20 +100,39 @@ class TorGossipNode {
 
     _peerManager.addPeer(peerOnion);
 
+    final id = _uuid.v4();
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    final topic = 'handshake';
+    final payload = '';
+
+    // Sign the ping too!
+    final sig = await _cryptoManager.sign(id, topic, payload, ts);
+    final myPub = await _cryptoManager.publicKeyHex;
+
     final envelope = GossipEnvelope(
-      id: _uuid.v4(),
+      id: id,
       origin: _myOnionAddress!,
-      topic: 'handshake',
-      payload: '',
-      timestamp: DateTime.now().millisecondsSinceEpoch,
+      topic: topic,
+      payload: payload,
+      timestamp: ts,
+      senderPub: myPub,
+      signature: sig,
     );
 
     _log("👋 Pinging peer $peerOnion...");
     await _sendToPeer(peerOnion, envelope);
   }
 
-  void _handleIncomingMessage(GossipEnvelope envelope) {
+  Future<void> _handleIncomingMessage(GossipEnvelope envelope) async {
     if (_dedupManager.isDuplicate(envelope.id)) return;
+
+    // 1. VERIFY SIGNATURE BEFORE PROCESSING
+    final isValid = await _cryptoManager.verify(envelope);
+    if (!isValid) {
+      _log("⛔ Rejected forged message from ${envelope.origin}");
+      return;
+    }
+
     _dedupManager.markSeen(envelope.id);
 
     if (envelope.origin != _myOnionAddress) {
@@ -116,7 +143,7 @@ class TorGossipNode {
     if (envelope.topic != 'handshake') {
       _msgController.add(envelope);
     } else {
-      _log("🤝 Received Handshake Ping from ${envelope.origin.substring(0, 6)}...");
+      _log("🤝 Valid Handshake from ${envelope.origin.substring(0, 6)}...");
     }
 
     _gossipToPeers(envelope);
@@ -125,11 +152,14 @@ class TorGossipNode {
   Future<void> _gossipToPeers(GossipEnvelope envelope) async {
     if (!_isStarted) return;
     final targets = _peerManager.getRandomPeers(3, exclude: {envelope.origin, _myOnionAddress ?? ''});
-    if (targets.isEmpty) return; // Silent return to reduce log spam
+    if (targets.isEmpty) return;
 
     _log("✨ Gossiping msg ${envelope.id.substring(0, 4)} to ${targets.length} peers...");
     for (var peer in targets) {
-      unawaited(_sendToPeer(peer, envelope));
+      // Use unawaited to fire and forget
+      _sendToPeer(peer, envelope).catchError((e) {
+         // silent catch for fanout errors
+      });
     }
   }
 
@@ -145,7 +175,6 @@ class TorGossipNode {
     final cleanHost = _peerManager.sanitizeOnion(peerOnion);
     if (cleanHost == null) return;
 
-    // Use http:// scheme for the new Client
     final url = 'http://$cleanHost/gossip';
 
     try {
@@ -173,10 +202,14 @@ class TorGossipNode {
     }
   }
 
+  void addPeer(String onionAddress) {
+    if (_peerManager.addPeer(onionAddress)) {
+      _log("➕ Manually added peer: $onionAddress");
+    }
+  }
+
   void _log(String msg) {
     if (!_logController.isClosed) _logController.add(msg);
     print("[TorGossip] $msg");
   }
 }
-
-void unawaited(Future<void> f) {}
