@@ -1,7 +1,7 @@
 name: tor_gossip
 description: A P2P gossip protocol implementation over Tor Hidden Services.
 version: 0.0.1
-homepage: https://github.com/your_username/tor_gossip
+repository: https://github.com/sarahroselives/tor_gossip
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
