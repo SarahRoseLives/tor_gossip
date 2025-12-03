@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:tor_hidden_service/tor_hidden_service.dart';
 import 'package:uuid/uuid.dart';
 
